@@ -293,22 +293,42 @@ int task_manager_list(cron_server_state_t *state, cron_msg_t *res) {
             res->status = RES_PART;
 
             char scheduled_type_buff[16];
-            if (tasks[i].sched_type == SCHEDULE_PERIODIC) {
-                sprintf(scheduled_type_buff, "PERIODIC");
-            } else if (tasks[i].sched_type == SCHEDULE_RELATIVE) {
-                sprintf(scheduled_type_buff, "RELATIVE");
-            } else {
-                sprintf(scheduled_type_buff, "ABSOLUTE");
+            char time_buff[32];
+
+            switch (tasks[i].sched_type) {
+                case SCHEDULE_ABSOLUTE: {
+                    sprintf(scheduled_type_buff, "ABSOLUTE");
+                    struct tm readable_time;
+
+                    if (localtime_r(&tasks[i].target_time, &readable_time) != &readable_time) {
+                        pthread_mutex_unlock(&state->tasks_mutex);
+                        mq_close(client_mq);
+                        return -1;
+                    }
+                    sprintf(time_buff, "%02d:%02d", readable_time.tm_hour, readable_time.tm_min);
+                    break;
+                }
+                case SCHEDULE_PERIODIC: {
+                    sprintf(scheduled_type_buff, "PERIODIC");
+                    sprintf(time_buff, "%u s", tasks[i].interval_sec);
+                    break;
+                }
+                case SCHEDULE_RELATIVE: {
+                    sprintf(scheduled_type_buff, "RELATIVE");
+                    sprintf(time_buff, "%u s", tasks[i].interval_sec);
+                    break;
+                }
+                default: {
+                    sprintf(scheduled_type_buff, "ERROR");
+                    sprintf(time_buff, "?????");
+                    break;
+                }
             }
 
-            long time_val = (tasks[i].sched_type == SCHEDULE_ABSOLUTE)
-                            ? (long)tasks[i].target_time
-                            : (long)tasks[i].interval_sec;
-
-            sprintf(res->response_payload, "%u\t|\t%s\t|\t%ld\t|\t%s %s\n",
+            sprintf(res->response_payload, "%u\t|\t%s\t|\t%s\t|\t%s %s\n",
                     tasks[i].task_id,
                     scheduled_type_buff,
-                    time_val,
+                    time_buff,
                     tasks[i].command,
                     tasks[i].args);
 
