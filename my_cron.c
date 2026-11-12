@@ -103,7 +103,7 @@ int server_run(int lock_fd){
     logger_init(SERVER_LOG_FILE, APP_NAME, dump_funtion);
 
     printf("URUCHOMIONO SERWER CRON\n");
-    fflush(stdin);
+    fflush(stdout);
     while(serverState.is_running){
         memset(&req, 0, MSG_SIZE);
         memset(&res, 0, MSG_SIZE);
@@ -114,56 +114,56 @@ int server_run(int lock_fd){
             continue;
         }
 
-        res.cmd_type = CMD_RESPONSE;
+        res.cmd_type = RESPONSE;
         res.client_pid = req.client_pid;
 
         switch (req.cmd_type) {
-            case CMD_ADD_TASK: {
+            case ADD_TASK: {
                 int new_id = task_manager_add(&serverState, &req.task_data);
-                res.status = (new_id > 0) ? RES_OK : RES_ERROR;
+                res.status = (new_id > 0) ? OK : ERROR;
                 res.target_task_id = (new_id > 0) ? (uint32_t)new_id : 0;
                 logger_log(LOG_LEVEL_STANDARD, "DODANO NOWE ZADANIE O ID: %d\n", new_id);
                 break;
             }
-            case CMD_CANCEL_TASK: {
+            case CANCEL_TASK: {
                 int err = task_manager_cancel(&serverState, req.target_task_id);
-                res.status = (err == 0) ? RES_OK : RES_ERROR;
+                res.status = (err == 0) ? OK : ERROR;
                 res.target_task_id = req.target_task_id;
                 logger_log(LOG_LEVEL_STANDARD, "USUNIĘTO ZADANIE O ID: %d\n", res.target_task_id);
                 break;
             }
-            case CMD_LIST_TASKS: {
+            case LIST_TASKS: {
                 int err = task_manager_list(&serverState, &res);
                 if (err != 0) {
-                    res.status = RES_ERROR;
+                    res.status = ERROR;
                     res.response_payload[0] = '\0';
                 } else {
-                    res.status = RES_OK;
+                    res.status = OK;
                 }
                 logger_log(LOG_LEVEL_STANDARD, "WYSŁANO STATUS SERWERA\n");
                 break;
             }
-            case CMD_STOP_SERVER: {
+            case STOP_SERVER: {
                 serverState.is_running = 0;
-                res.status = RES_OK;
+                res.status = OK;
                 logger_log(LOG_LEVEL_STANDARD, "OTRZYMANO KOMUNIKAT ZATRZYMANIA SERWERA\n");
                 break;
             }
 
             default: {
                 logger_log(LOG_LEVEL_MAX, "ODEBRANO NIEPOPRANĄ WIADOMOŚĆ SERWER\n");
-                res.status = RES_ERROR;
+                res.status = ERROR;
                 break;
             }
         }
 
-        ipc_server_send_response(&res);
+        server_res(&res);
     }
 
 
     task_manager_cancel_all(&serverState);
     logger_log(LOG_LEVEL_MAX, "USUNIĘTO WSZYSTKIE ZADANIA\n");
-    server_cleanup(&serverState);
+    server_destroy(&serverState);
     logger_log(LOG_LEVEL_MAX, "ZATRZYMANO SERWER\n");
     logger_destroy();
     return 0;
@@ -199,7 +199,7 @@ int server_init(cron_server_state_t *state){
 }
 
 // Sprzątanie zasobów serwera przy zamknięciu (wyrejestrowanie timerów, kolejki, logera)
-void server_cleanup(cron_server_state_t *state){
+void server_destroy(cron_server_state_t *state){
     state->is_running = 0;
     pthread_cancel(state->signal_thread);
     pthread_join(state->signal_thread, NULL);
@@ -210,7 +210,8 @@ void server_cleanup(cron_server_state_t *state){
     pthread_mutex_destroy(&state->tasks_mutex);
     close(state->lock_fd);
     printf("\nTERMINATED CRON SERVER\n");
-    fflush(stdin);
+    fflush(stdout);
+    g_server_state = NULL;
 }
 
 //wątek sygnałów
@@ -224,7 +225,7 @@ void * server_signal_thread(void * args){
     if(sigwait(&set, &recieved_signal_number) == 0){
         cron_msg_t wake_up_msg;
         memset(&wake_up_msg, 0, MSG_SIZE);
-        wake_up_msg.cmd_type = CMD_STOP_SERVER;
+        wake_up_msg.cmd_type = STOP_SERVER;
         mq_send(serverStatePtr->server_mq, (char *)&wake_up_msg, MSG_SIZE, 0);
     }
     return NULL;
@@ -260,7 +261,7 @@ int task_manager_add(cron_server_state_t *state, cron_task_t *new_task){
     struct sigevent sev;
     memset(&sev, 0, sizeof(struct sigevent));
     sev.sigev_notify = SIGEV_THREAD;
-    sev.sigev_notify_function = task_execution_handler;
+    sev.sigev_notify_function = task_handler;
     sev.sigev_notify_attributes = NULL;
     sev.sigev_value.sival_ptr = (void *)free_task_slot;
 
@@ -340,7 +341,7 @@ int task_manager_list(cron_server_state_t *state, cron_msg_t *res) {
     }
 
     char client_queue_name[64];
-    sprintf(client_queue_name, CRON_CLIENT_QUEUE_FMT, res->client_pid);
+    sprintf(client_queue_name, CRON_CLIENT_QUEUE_TEMPLATE, res->client_pid);
 
     mqd_t client_mq = mq_open(client_queue_name, O_WRONLY);
     if (client_mq == (mqd_t)-1) {
@@ -353,7 +354,7 @@ int task_manager_list(cron_server_state_t *state, cron_msg_t *res) {
 
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].is_active) {
-            res->status = RES_PART;
+            res->status = PART;
 
             char scheduled_type_buff[16];
             char time_buff[32];
@@ -405,7 +406,7 @@ int task_manager_list(cron_server_state_t *state, cron_msg_t *res) {
 
     pthread_mutex_unlock(&state->tasks_mutex);
 
-    res->status = RES_OK;
+    res->status = OK;
     res->response_payload[0] = '\0';
 
     mq_close(client_mq);
@@ -432,11 +433,11 @@ int task_manager_cancel_all(cron_server_state_t *state){
 
 extern char **environ;
 
-void task_execution_handler(union sigval sv) {
+void task_handler(union sigval sv) {
     cron_task_t *task = (cron_task_t *)sv.sival_ptr;
     if (!task) return;
 
-    char full_cmd[MAX_CMD_LEN + MAX_ARGS_LEN + 2];
+    char full_cmd[CMD_LEN + ARGS_LEN + 2];
 
     if (task->args[0] != '\0') {
         sprintf(full_cmd, "%s %s", task->command, task->args);
@@ -486,51 +487,51 @@ int client_run(int argc, char *argv[]) {
 
     req.client_pid = getpid();
 
-    int opt;
     char time_str[64] = {0};
     int action_count = 0;
 
-    optind = 1;
 
-    while ((opt = getopt(argc, argv, "a:g:t:c:lsh")) != -1) {
-        switch (opt) {
-            case 'a':
-                req.cmd_type = CMD_ADD_TASK;
-                strncpy(req.task_data.command, optarg, MAX_CMD_LEN - 1);
-                action_count++;
-                break;
-
-            case 'g':
-                strncpy(req.task_data.args, optarg, MAX_ARGS_LEN - 1);
-                break;
-
-            case 't':
-                strncpy(time_str, optarg, sizeof(time_str) - 1);
-                break;
-
-            case 'l':
-                req.cmd_type = CMD_LIST_TASKS;
-                action_count++;
-                break;
-
-            case 'c':
-                req.cmd_type = CMD_CANCEL_TASK;
-                req.target_task_id = (uint32_t)atoi(optarg);
-                action_count++;
-                break;
-
-            case 's':
-                req.cmd_type = CMD_STOP_SERVER;
-                action_count++;
-                break;
-
-            case 'h':
-                print_help(argv[0]);
-                return 0;
-
-            default:
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0) {
+            print_help(argv[0]);
+            return 0;
+        } else if (strcmp(argv[i], "-l") == 0) {
+            req.cmd_type = LIST_TASKS;
+            action_count++;
+        } else if (strcmp(argv[i], "-s") == 0) {
+            req.cmd_type = STOP_SERVER;
+            action_count++;
+        } else if (strcmp(argv[i], "-a") == 0) {
+            if (i + 1 >= argc) {
                 print_help(argv[0]);
                 return -1;
+            }
+            req.cmd_type = ADD_TASK;
+            strncpy(req.task_data.command, argv[++i], CMD_LEN - 1);
+            action_count++;
+        } else if (strcmp(argv[i], "-g") == 0) {
+            if (i + 1 >= argc) {
+                print_help(argv[0]);
+                return -1;
+            }
+            strncpy(req.task_data.args, argv[++i], ARGS_LEN - 1);
+        } else if (strcmp(argv[i], "-t") == 0) {
+            if (i + 1 >= argc) {
+                print_help(argv[0]);
+                return -1;
+            }
+            strncpy(time_str, argv[++i], sizeof(time_str) - 1);
+        } else if (strcmp(argv[i], "-c") == 0) {
+            if (i + 1 >= argc) {
+                print_help(argv[0]);
+                return -1;
+            }
+            req.cmd_type = CANCEL_TASK;
+            req.target_task_id = (uint32_t)atoi(argv[++i]);
+            action_count++;
+        } else {
+            print_help(argv[0]);
+            return -1;
         }
     }
 
@@ -543,18 +544,18 @@ int client_run(int argc, char *argv[]) {
         return -1;
     }
 
-    if (req.cmd_type == CMD_ADD_TASK) {
+    if (req.cmd_type == ADD_TASK) {
         if (strlen(time_str) == 0) {
             return -1;
         }
-        if (parse_schedule_args(time_str, &req.task_data.sched_type,
-                                &req.task_data.target_time,
-                                &req.task_data.interval_sec) != 0) {
+        if (normalize_time(time_str, &req.task_data.sched_type,
+                           &req.task_data.target_time,
+                           &req.task_data.interval_sec) != 0) {
             return -1;
         }
     }
 
-    if (ipc_client_send_and_receive(&req, &res) != 0) {
+    if (client_req_res(&req, &res) != 0) {
         return -1;
     }
 
@@ -562,10 +563,10 @@ int client_run(int argc, char *argv[]) {
         printf("%s", res.response_payload);
     }
 
-    return (res.status == RES_OK) ? 0 : -1;
+    return (res.status == OK) ? 0 : -1;
 }
 
-int parse_schedule_args(const char *time_str, schedule_type_t *type, time_t *target_time, uint32_t *interval) {
+int normalize_time(const char *time_str, schedule_type_t *type, time_t *target_time, uint32_t *interval) {
     if (!time_str || !type || !target_time || !interval || time_str[0] == '\0') {
         return -1;
     }
@@ -624,11 +625,11 @@ int parse_schedule_args(const char *time_str, schedule_type_t *type, time_t *tar
 }
 
 
-int ipc_client_send_and_receive(cron_msg_t *req, cron_msg_t *res) {
+int client_req_res(cron_msg_t *req, cron_msg_t *res) {
     if (!req || !res) return -1;
 
     char client_queue_name[64];
-    snprintf(client_queue_name, sizeof(client_queue_name), CRON_CLIENT_QUEUE_FMT, getpid());
+    sprintf(client_queue_name, CRON_CLIENT_QUEUE_TEMPLATE, getpid());
 
     struct mq_attr attr = {
             .mq_flags = 0,
@@ -666,7 +667,7 @@ int ipc_client_send_and_receive(cron_msg_t *req, cron_msg_t *res) {
             printf("%s", res->response_payload);
         }
 
-        if (res->status != RES_PART) {
+        if (res->status != PART) {
             break;
         }
     }
@@ -674,13 +675,13 @@ int ipc_client_send_and_receive(cron_msg_t *req, cron_msg_t *res) {
     mq_close(server_mq);
     mq_close(client_mq);
     mq_unlink(client_queue_name);
-    return (res->status == RES_OK) ? 0 : -1;
+    return (res->status == OK) ? 0 : -1;
 }
 
-int ipc_server_send_response(cron_msg_t *res){
+int server_res(cron_msg_t *res){
 
     char client_queue_name[64];
-    sprintf(client_queue_name, CRON_CLIENT_QUEUE_FMT, res->client_pid);
+    sprintf(client_queue_name, CRON_CLIENT_QUEUE_TEMPLATE, res->client_pid);
     mqd_t client_mq = mq_open(client_queue_name,O_WRONLY);
     if(client_mq == -1){
         return -1;

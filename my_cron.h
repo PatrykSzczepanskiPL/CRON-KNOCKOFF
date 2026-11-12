@@ -29,14 +29,14 @@
 // Ścieżki IPC i plików systemowych
 #define CRON_LOCK_FILE      "/tmp/my_cron.lock"
 #define CRON_SERVER_QUEUE   "/my_cron_server_queue"
-#define CRON_CLIENT_QUEUE_FMT "/my_cron_client_%d_queue"
+#define CRON_CLIENT_QUEUE_TEMPLATE "/my_cron_client_%d_queue"
 #define SERVER_LOG_FILE "/tmp/cron_logs.log"
 #define APP_NAME "CRON"
 
-#define MAX_CMD_LEN         256
-#define MAX_ARGS_LEN        256
-#define MAX_TASKS           64
-#define MSG_SIZE            sizeof(cron_msg_t)
+#define CMD_LEN 256
+#define ARGS_LEN 256
+#define MAX_TASKS 64
+#define MSG_SIZE sizeof(cron_msg_t)
 
 #define SIG_STOP_SERVER (SIGRTMIN+3)
 
@@ -52,18 +52,18 @@ typedef enum {
 
 // Typ operacji (polecenia IPC od Klienta do Serwera)
 typedef enum {
-    CMD_ADD_TASK = 1,       // Dodanie nowego zadania
-    CMD_LIST_TASKS,         // Pobranie listy zaplanowanych zadań
-    CMD_CANCEL_TASK,        // Anulowanie wskazanego zadania po ID
-    CMD_STOP_SERVER,        // Zakończenie pracy serwera
-    CMD_RESPONSE            // Odpowiedź serwera do klienta
+    ADD_TASK = 1,       // Dodanie nowego zadania
+    LIST_TASKS,         // Pobranie listy zaplanowanych zadań
+    CANCEL_TASK,        // Anulowanie wskazanego zadania po ID
+    STOP_SERVER,        // Zakończenie pracy serwera
+    RESPONSE            // Odpowiedź serwera do klienta
 } command_type_t;
 
 // Status odpowiedzi serwera
 typedef enum {
-    RES_OK = 0,
-    RES_PART,
-    RES_ERROR
+    OK = 0,
+    PART,
+    ERROR
 } response_status_t;
 
 
@@ -72,8 +72,8 @@ typedef enum {
 // Definicja pojedynczego zadania w systemie
 typedef struct {
     uint32_t task_id;               // Unikalny identyfikator zadania
-    char command[MAX_CMD_LEN];       // Ścieżka do programu/polecenia
-    char args[MAX_ARGS_LEN];         // Argumenty polecenia
+    char command[CMD_LEN];       // Ścieżka do programu/polecenia
+    char args[ARGS_LEN];         // Argumenty polecenia
     schedule_type_t sched_type;      // Typ harmonogramowania
     time_t target_time;              // Czas uruchomienia (dla ABSOLUTE / RELATIVE)
     uint32_t interval_sec;           // Interwał w sekundach (dla PERIODIC)
@@ -129,7 +129,7 @@ int server_init(cron_server_state_t *state);
 
 
 // Sprzątanie zasobów serwera przy zamknięciu (wyrejestrowanie timerów, kolejki, logera)
-void server_cleanup(cron_server_state_t *state);
+void server_destroy(cron_server_state_t *state);
 void * server_signal_thread(void * args);
 /*
  * MODUŁ ZARZĄDZANIA ZADANIAMI I ZEGARAMI (POSIX Timers)
@@ -150,7 +150,7 @@ int task_manager_list(cron_server_state_t *state, cron_msg_t * res);
 int task_manager_cancel_all(cron_server_state_t *state);
 
 // Callback / Handler wywoływany przez Zegar POSIX w momencie upłynięcia czasu zadania
-void task_execution_handler(union sigval sv);
+void task_handler(union sigval sv);
 
 
 /*
@@ -163,7 +163,7 @@ static void print_help(const char *prog_name);
 int client_run(int argc, char *argv[]);
 
 // Parsowanie czasu podanego z CLI (np. względny +10s, bezwzględny HH:MM, cykliczny *5s)
-int parse_schedule_args(const char *time_str, schedule_type_t *type, time_t *target_time, uint32_t *interval);
+int normalize_time(const char *time_str, schedule_type_t *type, time_t *target_time, uint32_t *interval);
 
 
 /*
@@ -171,10 +171,10 @@ int parse_schedule_args(const char *time_str, schedule_type_t *type, time_t *tar
  */
 
 // Wysyła komunikat z Klienta do Serwera i czeka na odpowiedź w dedykowanej kolejce zwrotnej
-int ipc_client_send_and_receive(cron_msg_t *req, cron_msg_t *res);
+int client_req_res(cron_msg_t *req, cron_msg_t *res);
 
 // Wysłanie odpowiedzi z Serwera do konkretnego Klienta
-int ipc_server_send_response(cron_msg_t *res);
+int server_res(cron_msg_t *res);
 
 #endif // CRON_H
 
