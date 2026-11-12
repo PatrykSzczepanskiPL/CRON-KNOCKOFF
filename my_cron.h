@@ -23,11 +23,15 @@
 #include <string.h>
 #include <spawn.h>
 #include <wait.h>
+#include "./logger/logger.h"
+
 
 // Ścieżki IPC i plików systemowych
 #define CRON_LOCK_FILE      "/tmp/my_cron.lock"
 #define CRON_SERVER_QUEUE   "/my_cron_server_queue"
 #define CRON_CLIENT_QUEUE_FMT "/my_cron_client_%d_queue"
+#define SERVER_LOG_FILE "/tmp/cron_logs.log"
+#define APP_NAME "CRON"
 
 #define MAX_CMD_LEN         256
 #define MAX_ARGS_LEN        256

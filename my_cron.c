@@ -4,6 +4,49 @@
 
 #include "my_cron.h"
 
+static cron_server_state_t *g_server_state = NULL;
+
+void dump_funtion(FILE *f) {
+    if (!f || !g_server_state) return;
+
+
+    pthread_mutex_lock(&g_server_state->tasks_mutex);
+
+    fprintf(f, "[DUMP] pid=%d running=%d next_id=%d\n",
+            getpid(), g_server_state->is_running, g_server_state->next_task_id);
+
+    for (int i = 0; i < MAX_TASKS; i++) {
+        cron_task_t *t = &g_server_state->tasks[i];
+        if (!t->is_active) continue;
+
+        const char *type = "UNKNOWN";
+        char time_buff[32] = {0};
+
+        if (t->sched_type == SCHEDULE_PERIODIC) {
+            type = "PERIODIC";
+            sprintf(time_buff, "*%us", t->interval_sec);
+        } else if (t->sched_type == SCHEDULE_RELATIVE) {
+            type = "RELATIVE";
+            sprintf(time_buff, "+%us", t->interval_sec);
+        } else if (t->sched_type == SCHEDULE_ABSOLUTE) {
+            type = "ABSOLUTE";
+            struct tm tm_info;
+            if (localtime_r(&t->target_time, &tm_info) != NULL) {
+                sprintf(time_buff, "%02d:%02d:%02d",
+                        tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
+            } else {
+                sprintf(time_buff, "%ld", (long)t->target_time);
+            }
+        }
+
+        fprintf(f, "  slot=%d id=%u type=%s time=%s cmd=\"%s %s\"\n",
+                i, t->task_id, type, time_buff, t->command, t->args);
+    }
+        pthread_mutex_unlock(&g_server_state->tasks_mutex);
+}
+
+
+
 
 int is_first_instance(int *lock_fd){
     if(!lock_fd){
@@ -27,12 +70,12 @@ int is_first_instance(int *lock_fd){
             return 0;
         }
         close(fd);
+        printf("Błąd ustawienia zamka na pliku\n");
         return -1;
     }
 
     *lock_fd = fd;
     return 1;
-
 }
 
 
@@ -43,24 +86,31 @@ int is_first_instance(int *lock_fd){
 // Inicjalizacja i pętla główna serwera
 int server_run(int lock_fd){
     if(lock_fd == -1){
+        printf("Przekazano błedne argumenty funkcji\n");
         return -1;
     }
+
+
     cron_server_state_t serverState;
     cron_msg_t req = {0};
     cron_msg_t res = {0};
 
     if(server_init(&serverState) != 0){
+        printf("Nie udało się zainicjalizwoać serwera\n");
         return -1;
     }
     serverState.lock_fd = lock_fd;
-    printf("STARTED CRON SERVER\n");
+    logger_init(SERVER_LOG_FILE, APP_NAME, dump_funtion);
+
+    printf("URUCHOMIONO SERWER CRON\n");
     fflush(stdin);
     while(serverState.is_running){
         memset(&req, 0, MSG_SIZE);
         memset(&res, 0, MSG_SIZE);
 
         if(mq_receive(serverState.server_mq, (char *)&req, MSG_SIZE, NULL) != MSG_SIZE){
-            //TODO: logowanie odczytania niepoprawnej wiadomości
+            printf("Odebrano uszkodzoną wiadomość");
+            logger_log(LOG_LEVEL_MAX, "ODEBRANO NIEPOPRAWNĄ WIADOMOŚĆ\n");
             continue;
         }
 
@@ -72,27 +122,39 @@ int server_run(int lock_fd){
                 int new_id = task_manager_add(&serverState, &req.task_data);
                 res.status = (new_id > 0) ? RES_OK : RES_ERROR;
                 res.target_task_id = (new_id > 0) ? (uint32_t)new_id : 0;
+                logger_log(LOG_LEVEL_STANDARD, "DODANO NOWE ZADANIE O ID: %d\n", new_id);
                 break;
             }
             case CMD_CANCEL_TASK: {
                 int err = task_manager_cancel(&serverState, req.target_task_id);
                 res.status = (err == 0) ? RES_OK : RES_ERROR;
                 res.target_task_id = req.target_task_id;
+                logger_log(LOG_LEVEL_STANDARD, "USUNIĘTO ZADANIE O ID: %d\n", res.target_task_id);
                 break;
             }
             case CMD_LIST_TASKS: {
                 int err = task_manager_list(&serverState, &res);
-                res.status = (err == 0) ? RES_OK : RES_ERROR;
+                if (err != 0) {
+                    res.status = RES_ERROR;
+                    res.response_payload[0] = '\0';
+                } else {
+                    res.status = RES_OK;
+                }
+                logger_log(LOG_LEVEL_STANDARD, "WYSŁANO STATUS SERWERA\n");
                 break;
             }
-            case CMD_STOP_SERVER:
+            case CMD_STOP_SERVER: {
                 serverState.is_running = 0;
                 res.status = RES_OK;
+                logger_log(LOG_LEVEL_STANDARD, "OTRZYMANO KOMUNIKAT ZATRZYMANIA SERWERA\n");
                 break;
+            }
 
-            default:
+            default: {
+                logger_log(LOG_LEVEL_MAX, "ODEBRANO NIEPOPRANĄ WIADOMOŚĆ SERWER\n");
                 res.status = RES_ERROR;
-                continue;
+                break;
+            }
         }
 
         ipc_server_send_response(&res);
@@ -100,7 +162,10 @@ int server_run(int lock_fd){
 
 
     task_manager_cancel_all(&serverState);
+    logger_log(LOG_LEVEL_MAX, "USUNIĘTO WSZYSTKIE ZADANIA\n");
     server_cleanup(&serverState);
+    logger_log(LOG_LEVEL_MAX, "ZATRZYMANO SERWER\n");
+    logger_destroy();
     return 0;
 }
 int server_init(cron_server_state_t *state){
@@ -128,7 +193,7 @@ int server_init(cron_server_state_t *state){
     }
 
 
-
+    g_server_state = state;
     pthread_create(&state->signal_thread,NULL, server_signal_thread,(void *)state);
     return 0;
 }
@@ -162,8 +227,6 @@ void * server_signal_thread(void * args){
         wake_up_msg.cmd_type = CMD_STOP_SERVER;
         mq_send(serverStatePtr->server_mq, (char *)&wake_up_msg, MSG_SIZE, 0);
     }
-
-
     return NULL;
 }
 
@@ -209,7 +272,7 @@ int task_manager_add(cron_server_state_t *state, cron_task_t *new_task){
 
     struct itimerspec ts;
     memset(&ts, 0, sizeof(ts));
-    int flags = 0; // Domyślnie czas względny
+    int flags = 0;
 
     switch (free_task_slot->sched_type) {
         case SCHEDULE_RELATIVE:
@@ -387,16 +450,15 @@ void task_execution_handler(union sigval sv) {
     if (posix_spawnp(&pid, "sh", NULL, NULL, argv, environ) == 0) {
         waitpid(pid, NULL, 0); //
     }
-
+    uint32_t finished_id = task->task_id;
     if (task->sched_type != SCHEDULE_PERIODIC) {
         cron_server_state_t *state = (cron_server_state_t *)task->server_state;
         if (state) {
             task_manager_cancel(state, task->task_id);
         }
     }
+    logger_log(LOG_LEVEL_MIN, "WYKONANO ZADANIE O ID %u\n", finished_id);
 }
-
-
 
 
 static void print_help(const char *prog_name) {
@@ -410,8 +472,6 @@ static void print_help(const char *prog_name) {
     printf("  -s               Zatrzymuje usługę serwera\n");
     printf("  -h               Wyświetla tę pomoc\n");
 }
-
-
 
 int client_run(int argc, char *argv[]) {
     if (argc <= 1 || !argv) {
@@ -562,8 +622,6 @@ int parse_schedule_args(const char *time_str, schedule_type_t *type, time_t *tar
 
     return 0;
 }
-
-
 
 
 int ipc_client_send_and_receive(cron_msg_t *req, cron_msg_t *res) {
